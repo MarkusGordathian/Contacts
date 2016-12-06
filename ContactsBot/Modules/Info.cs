@@ -1,6 +1,4 @@
 ﻿using Discord.Commands;
-using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -11,6 +9,7 @@ namespace ContactsBot.Modules
     public class Info : ModuleBase
     {
         private CommandService _commands;
+        private BotConfiguration _config;
 
         [Command("help"), Summary("Displays this help message")]
         public async Task Help()
@@ -43,15 +42,20 @@ namespace ContactsBot.Modules
                 }
             }
 
-            var replyChannel = await Context.User.GetDMChannelAsync();
-            await replyChannel.SendMessageAsync(response.ToString());
-            await ReplyAsync("Check your DM's. I sent you a message.");
+            await ReplyAsync(response.ToString());
+        }
+
+        [Command("motd"), Summary("Displays the current MOTD")]
+        public async Task Motd()
+        {
+            await ReplyAsync(string.Format(_config.MessageOfTheDay, Context.User.Username));
         }
 
         // Upon creation of this module, the command service will be loaded from the dependency map
-        public Info(CommandService cs)
+        public Info(CommandService cs, BotConfiguration config)
         {
             _commands = cs;
+            _config = config;
         }
     }
 }

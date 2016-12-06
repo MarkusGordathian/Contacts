@@ -1,36 +1,31 @@
 ﻿using Discord.Commands;
 using System;
-using System.Collections.Generic;
-using System.IO;
 using System.Net;
-using Newtonsoft.Json.Linq;
-using System.Text;
 using System.Linq;
 using System.Xml.Linq;
 using System.Threading.Tasks;
 using System.Xml;
-using Newtonsoft.Json;
+using AngleSharp;
+using AngleSharp.Parser.Html;
 
 namespace ContactsBot.Modules
 {
-    [Group("docs")]
     public class Documentation : ModuleBase
     {
-        private const string MSDNIcon = "http://i.imgur.com/LCr4b6P.png";
-        private const string MSDocsIcon = "http://i.imgur.com/GSXfzSU.jpg";
+        private string GetRssUrl(string query) => $"https://social.msdn.microsoft.com/search/en-US/feed?query={Uri.EscapeDataString(query)}&format=RSS";
+        private string GetHtmlUrl(string query) => $"https://social.msdn.microsoft.com/Search/en-US?query={Uri.EscapeDataString(query)}";
 
-        private enum ReplyType
-        {
-            MSDN,
-            MSDocs
-        }
+        private const string RefBaseUrl = "https://referencesource.microsoft.com";
+        private string GetRefSourceUrl(string query) => $"{RefBaseUrl}/api/symbols/?symbol={Uri.EscapeDataString(query)}";
+        private string GetRefHtmlUrl(string query) => $"{RefBaseUrl}/#q={Uri.EscapeDataString(query)}";
 
-        [Command("msdn")]
+        [Command("docs"), Alias("msdn")]
+        [Summary("Searches official Microsoft documentation for a given query.")]
         public async Task Msdn([Summary("The query to search for")] [Remainder] string query)
         {
             try
             {
-                var request = HttpWebRequest.CreateHttp($"https://social.msdn.microsoft.com/search/en-US/feed?query={Uri.EscapeDataString(query)}&format=RSS");
+                var request = HttpWebRequest.CreateHttp(GetRssUrl(query));
 
                 var xmlDoc = XDocument.Load((await request.GetResponseAsync()).GetResponseStream());
 
@@ -42,9 +37,15 @@ namespace ContactsBot.Modules
                         Title = d.Descendants(XName.Get("title", "")).FirstOrDefault()?.Value,
                         Description = d.Descendants(XName.Get("description", "")).FirstOrDefault()?.Value,
                         Url = d.Descendants(XName.Get("link", "")).FirstOrDefault()?.Value,
-                        ReplyType = ReplyType.MSDN
+                        ListingUrl = GetHtmlUrl(query)
                     })
                     .FirstOrDefault();
+
+                if (item == null)
+                {
+                    await ReplyAsync($"No results for **{query}**.");
+                    return;
+                }
 
                 await ReplyWithResponse(item);
             }
@@ -56,66 +57,86 @@ namespace ContactsBot.Modules
             {
                 await ReplyAsync("There was a problem parsing the XML response from MSDN.");
             }
-            catch (Exception)
-            {
-                await ReplyAsync("Something weird happened.");
-            }
         }
 
-        [Command("msdocs")]
-        public async Task Docs([Summary("The query to search for")] [Remainder] string query)
+        [Command("ref"), Alias("source")]
+        [Summary("Searches the .NET reference source.")]
+        public async Task ReferenceSource([Summary("The query to search for")] [Remainder] string query)
         {
+            //Stupid hack because 1.0 lowercases command args
+            query = Context.Message.Content.Substring(Context.Message.Content.IndexOf(' ') + 1);
+
             try
             {
-                var request = HttpWebRequest.CreateHttp($"https://docs.microsoft.com/api/search?search={Uri.EscapeDataString(query)}&locale=en-us&$top=10");
-                using (StreamReader reader = new StreamReader((await request.GetResponseAsync()).GetResponseStream()))
+                var html = await BrowsingContext.New(Configuration.Default.WithDefaultLoader()).OpenAsync(GetRefSourceUrl(query));
+
+                string note = html.QuerySelector("div.note").TextContent;
+
+                var allItems = html.QuerySelectorAll("a");
+                var item = allItems.Skip(1).First();
+
+                if (Char.IsUpper(query[0]))
                 {
-                    var response = JObject.Parse(reader.ReadToEnd());
-                    var result = response.First.First.First();
+                    var found = allItems.FirstOrDefault(d => d.QuerySelector(".resultKind")?.TextContent == "class" ||
+                                                             d.QuerySelector(".resultKind")?.TextContent == "struct");
 
-                    var item = new QueryResponse
+                    if (found != null)
                     {
-                        OriginalQuery = query,
-                        Title = result["title"].Value<string>(),
-                        Description = result["description"].Value<string>(),
-                        Url = result["url"].Value<string>(),
-                        ReplyType = ReplyType.MSDocs
-                    };
-
-                    await ReplyWithResponse(item);
+                        item = found;
+                    }
                 }
+
+                if (note == "No results found")
+                {
+                    await ReplyAsync($"No results for **{query}**.");
+                    return;
+                }
+
+                await ReplyWithResponse(new QueryResponse
+                {
+                    OriginalQuery = query
+                },
+                new Discord.EmbedBuilder
+                {
+                    Title = item.ParentElement.Id,
+                    Url = $"{RefBaseUrl}{item.Attributes["href"].Value}",
+                    Footer = new Discord.EmbedFooterBuilder
+                    {
+                        Text = $"{item.QuerySelector(".resultKind").TextContent} {item.QuerySelector(".resultName").TextContent}",
+                        IconUrl = $"{RefBaseUrl}{item.QuerySelector("img").Attributes["src"].Value}"
+                    },
+                    Color = new Discord.Color(104, 33, 122)
+                });
             }
             catch (WebException)
             {
                 await ReplyAsync("Sorry, there was a network issue.");
             }
-            catch (JsonException)
+            catch (HtmlParseException)
             {
-                await ReplyAsync("There was a problem parsing the JSON response from MSDocs.");
-            }
-            catch (IOException)
-            {
-                await ReplyAsync("There was an issue in reading the response from MSDocs.");
-            }
-            catch (Exception)
-            {
-                await ReplyAsync("Something weird happened.");
+                await ReplyAsync("There was a problem parsing the HTML response from the reference source.");
             }
         }
 
-        private async Task ReplyWithResponse(QueryResponse response)
+        private async Task ReplyWithResponse(QueryResponse response, Discord.EmbedBuilder overload = null)
         {
-            var embed = new Discord.EmbedBuilder
+            Discord.EmbedBuilder embed = overload;
+
+            if (overload == null)
             {
-                Title = response.Title,
-                Description = WebUtility.HtmlDecode(response.Description),
-                Url = response.Url,
-                Color = new Discord.Color(104, 33, 122),
-                Thumbnail = new Discord.EmbedThumbnailBuilder()
+                embed = new Discord.EmbedBuilder
                 {
-                    Url = (response.ReplyType == ReplyType.MSDN ? MSDNIcon : MSDocsIcon)
-                }
-            };
+                    Title = response.Title,
+                    Description = WebUtility.HtmlDecode(response.Description),
+                    Url = response.Url,
+                    Color = new Discord.Color(104, 33, 122),
+                    Author = new Discord.EmbedAuthorBuilder
+                    {
+                        Name = $"{new Uri(response.Url).Host} (click for more)",
+                        Url = response.ListingUrl
+                    }
+                };
+            }
 
             await ReplyAsync($"Found something for **{response.OriginalQuery}**!", false, embed);
         }
@@ -128,7 +149,7 @@ namespace ContactsBot.Modules
             public string Description { get; set; }
             public string Url { get; set; }
 
-            public ReplyType ReplyType { get; set; }
+            public string ListingUrl { get; set; }
         }
     }
 }
